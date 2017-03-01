@@ -45,10 +45,19 @@ import android.provider.ContactsContract.Groups;
 import android.provider.ContactsContract.Profile;
 import android.provider.ContactsContract.RawContacts;
 import android.provider.ContactsContract.RawContactsEntity;
+import android.text.TextUtils;
+import android.telephony.PhoneNumberUtils;
+import android.telephony.SubscriptionManager;
+import android.telephony.SubscriptionInfo;
 import android.util.Log;
 import android.widget.Toast;
 
 import com.android.contacts.activities.ContactEditorBaseActivity;
+import com.android.contacts.common.MoreContactUtils;
+import com.android.contacts.common.SimContactsConstants;
+import com.android.contacts.common.SimContactsOperation;
+import com.android.contacts.common.model.ValuesDelta;
+import com.android.contacts.common.model.account.ExchangeAccountType;
 import com.android.contacts.common.compat.CompatUtils;
 import com.android.contacts.common.database.ContactUpdateUtils;
 import com.android.contacts.common.model.AccountTypeManager;
@@ -61,7 +70,6 @@ import com.android.contacts.common.util.PermissionsUtil;
 import com.android.contacts.compat.PinnedPositionsCompat;
 import com.android.contacts.activities.ContactEditorBaseActivity.ContactEditor.SaveMode;
 import com.android.contacts.util.ContactPhotoUtils;
-
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
@@ -69,6 +77,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.codeaurora.wrapper.UiccPhoneBookController_Wrapper;
 
 /**
  * A service responsible for saving changes to the content provider.
@@ -93,6 +103,7 @@ public class ContactSaveService extends IntentService {
     public static final String EXTRA_SAVE_IS_PROFILE = "saveIsProfile";
     public static final String EXTRA_SAVE_SUCCEEDED = "saveSucceeded";
     public static final String EXTRA_UPDATED_PHOTOS = "updatedPhotos";
+    public static final String SAVE_CONTACT_RESULT = "saveResult";
 
     public static final String ACTION_CREATE_GROUP = "createGroup";
     public static final String ACTION_RENAME_GROUP = "renameGroup";
@@ -147,6 +158,27 @@ public class ContactSaveService extends IntentService {
 
     private static final int PERSIST_TRIES = 3;
 
+    public static final int RESULT_UNCHANGED = 0;
+    public static final int RESULT_SUCCESS = 1;
+    public static final int RESULT_FAILURE = 2;
+    public static final int RESULT_NO_NUMBER_AND_EMAIL = 3;
+    public static final int RESULT_SIM_FAILURE = 4;   //only for sim operation failure
+    public static final int RESULT_EMAIL_FAILURE = 5; // only for sim email operation failure
+    // only for sim failure of number or anr is too long
+    public static final int RESULT_NUMBER_ANR_FAILURE = 6;
+    public static final int RESULT_SIM_FULL_FAILURE = 7; // only for sim card is full
+    public static final int RESULT_TAG_FAILURE = 8; // only for sim failure of name is too long
+    public static final int RESULT_NUMBER_INVALID = 9; // only for sim failure of number is valid
+
+    public static final int RESULT_MEMORY_FULL_FAILURE = 11; //for memory full exception
+    public static final int RESULT_NUMBER_TYPE_FAILURE =12;  //only for sim failure of number TYPE
+
+    private final int MAX_EMAIL_LENGTH = 40;
+    private final int MAX_EN_LENGTH = 14;
+    private final int MAX_CH_LENGTH = 6;
+
+    private static SimContactsOperation mSimContactsOperation;
+    private SubscriptionManager mSubscriptionManager;
     private static final int MAX_CONTACTS_PROVIDER_BATCH_SIZE = 499;
 
     public interface Listener {
@@ -162,6 +194,12 @@ public class ContactSaveService extends IntentService {
         super(TAG);
         setIntentRedelivery(true);
         mMainHandler = new Handler(Looper.getMainLooper());
+    }
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        mSubscriptionManager = SubscriptionManager.from(this);
     }
 
     public static void registerListener(Listener listener) {
@@ -424,8 +462,30 @@ public class ContactSaveService extends IntentService {
         long insertedRawContactId = -1;
 
         // Attempt to persist changes
+        Integer result = RESULT_FAILURE;
+
+        ArrayList<Long> rawContactsList = new ArrayList<Long>();
+        boolean isCardOperation = false;
+        for (int i=0; i < state.size(); i++) {
+            final RawContactDelta entity = state.get(i);
+            final String accountType = entity.getValues().getAsString(RawContacts.ACCOUNT_TYPE);
+            final String accountName = entity.getValues().getAsString(RawContacts.ACCOUNT_NAME);
+            rawContactsList.add(entity.getRawContactId());
+            if (accountType != null
+                    && ExchangeAccountType.isExchangeType(accountType))
+                removeDisplayName(entity);
+            final int subscription = MoreContactUtils.getSubscription(
+                accountType, accountName);
+            isCardOperation = (subscription != SubscriptionManager.INVALID_SUBSCRIPTION_ID) ?
+                    true : false;
+            if (isCardOperation) {
+                result = doSaveToSimCard(entity, resolver, subscription);
+                Log.d(TAG, "doSaveToSimCard result is  " + result);
+            }
+        }
         int tries = 0;
         while (tries++ < PERSIST_TRIES) {
+            if (result == RESULT_SUCCESS || result == RESULT_FAILURE) {
             try {
                 // Build operations and try applying
                 final ArrayList<CPOWrapper> diffWrapper = state.buildDiffWrapper();
@@ -546,6 +606,7 @@ public class ContactSaveService extends IntentService {
                 if (isProfile) {
                     for (RawContactDelta delta : state) {
                         delta.setProfileQueryUri();
+                        }
                     }
                 }
             }
@@ -583,6 +644,115 @@ public class ContactSaveService extends IntentService {
             deliverCallback(callbackIntent);
         }
     }
+
+    private void removeDisplayName(RawContactDelta entity) {
+        ArrayList<ValuesDelta> names = entity
+                .getMimeEntries(StructuredName.CONTENT_ITEM_TYPE);
+        if (names != null
+                && names.get(0).containsKey(StructuredName.DISPLAY_NAME))
+            names.get(0).putNull(StructuredName.DISPLAY_NAME);
+    }
+
+    private Integer doSaveToSimCard(RawContactDelta entity, ContentResolver resolver,
+            int subscription) {
+
+            boolean isInsert = entity.isContactInsert();
+            Integer result = RESULT_SIM_FAILURE;
+            mSimContactsOperation = new SimContactsOperation(this);
+
+            ContentValues values = entity.buildSimDiff();
+            String tag = null;
+            String number = null;
+            String anr = null;
+            String email = null;
+
+            if(entity.isContactInsert()){
+                tag = values.getAsString(SimContactsConstants.STR_TAG);
+                number = values.getAsString(SimContactsConstants.STR_NUMBER);
+                anr = values.getAsString(SimContactsConstants.STR_ANRS);
+                email = values.getAsString(SimContactsConstants.STR_EMAILS);
+            } else {
+                tag = values.getAsString(SimContactsConstants.STR_NEW_TAG);
+                number = values.getAsString(SimContactsConstants.STR_NEW_NUMBER);
+                anr = values.getAsString(SimContactsConstants.STR_NEW_ANRS);
+                email = values.getAsString(SimContactsConstants.STR_NEW_EMAILS);
+            }
+
+            if (TextUtils.isEmpty(number) && TextUtils.isEmpty(anr) && TextUtils.isEmpty(email)) {
+                return RESULT_NO_NUMBER_AND_EMAIL;
+            }
+
+            if (!TextUtils.isEmpty(number)) {
+                if (number.length() > MoreContactUtils.MAX_LENGTH_NUMBER_IN_SIM) {
+                    return RESULT_NUMBER_ANR_FAILURE;
+                } else if (number.contains(SimContactsConstants.STR_ANRS)) {
+                    return RESULT_NUMBER_TYPE_FAILURE;
+                }
+            }
+
+            if (!TextUtils.isEmpty(anr)) {
+                String[] anrs = anr.split(SimContactsConstants.ANR_SEP);
+                if (anrs != null) {
+                    if (anrs.length > MoreContactUtils
+                            .getOneSimAnrCount(this, subscription)) {
+                        return RESULT_NUMBER_TYPE_FAILURE;
+                    }
+                    for (String mAnr : anrs) {
+                        if (mAnr.length() > MoreContactUtils.MAX_LENGTH_NUMBER_IN_SIM) {
+                            return RESULT_NUMBER_ANR_FAILURE;
+                        }
+                    }
+                }
+            }
+
+            if (!TextUtils.isEmpty(number) && TextUtils.isEmpty(PhoneNumberUtils
+                    .stripSeparators(number))) {
+                return RESULT_NUMBER_INVALID;
+            }
+
+            if (!TextUtils.isEmpty(email)) {
+                String[] emails = email.split(SimContactsConstants.EMAIL_SEP);
+                for (String mEmail : emails) {
+                    if (mEmail != null && mEmail.length() > MAX_EMAIL_LENGTH) {
+                        return RESULT_EMAIL_FAILURE;
+                    }
+                }
+            }
+
+        if (entity.isContactInsert()) {
+            int count = 0;
+            SubscriptionInfo subInfoRecord = null;
+            try {
+                subInfoRecord = mSubscriptionManager
+                        .getActiveSubscriptionInfoForSimSlotIndex(subscription);
+            } catch (SecurityException e) {
+                Log.w(TAG, "SecurityException thrown, lack permission for"
+                        + " getActiveSubscriptionInfoList", e);
+            }
+            if (subInfoRecord != null) {
+                int[] adnCount = UiccPhoneBookController_Wrapper
+                        .getAdnRecordsCapacityForSubscriber(subInfoRecord.getSubscriptionId());
+                if(adnCount!=null)
+                    count= adnCount[MoreContactUtils.ADN_USED_POS];
+            }
+            if (count >0 && count == MoreContactUtils.getAdnCount(this, subscription)) {
+                return RESULT_SIM_FULL_FAILURE;
+            }
+        }
+
+            if (isInsert) {
+                Uri resultUri = mSimContactsOperation.insert(values,
+                        subscription);
+                if (resultUri != null)
+                    result = RESULT_SUCCESS;
+            } else {
+                int resultInt = mSimContactsOperation.update(values,
+                        subscription);
+                if (resultInt == 1)
+                    result = RESULT_SUCCESS;
+            }
+            return result;
+        }
 
     /**
      * Splits "diff" into subsets based on "MAX_CONTACTS_PROVIDER_BATCH_SIZE", applies each of the
@@ -1083,12 +1253,27 @@ public class ContactSaveService extends IntentService {
 
     private void deleteContact(Intent intent) {
         Uri contactUri = intent.getParcelableExtra(EXTRA_CONTACT_URI);
+        mSimContactsOperation = new SimContactsOperation(this);
         if (contactUri == null) {
             Log.e(TAG, "Invalid arguments for deleteContact request");
             return;
         }
 
-        getContentResolver().delete(contactUri, null, null);
+        final List<String> segments = contactUri.getPathSegments();
+        // Contains an Id.
+        final long uriContactId = Long.parseLong(segments.get(3));
+        int subscription = mSimContactsOperation
+                .getSimSubscription(uriContactId);
+        if (subscription != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+            ContentValues values = mSimContactsOperation
+                    .getSimAccountValues(uriContactId);
+            int result = mSimContactsOperation.delete(values, subscription);
+            if (result == RESULT_SUCCESS) {
+                getContentResolver().delete(contactUri, null, null);
+            }
+        } else {
+            getContentResolver().delete(contactUri, null, null);
+        }
     }
 
     private void deleteMultipleContacts(Intent intent) {
@@ -1306,22 +1491,24 @@ public class ContactSaveService extends IntentService {
 
         final StringBuilder queryBuilder = new StringBuilder();
         final String stringContactIds[] = new String[contactIds.length];
+        queryBuilder.append(RawContacts.CONTACT_ID + " in (");
         for (int i = 0; i < contactIds.length; i++) {
-            queryBuilder.append(RawContacts.CONTACT_ID + "=?");
             stringContactIds[i] = String.valueOf(contactIds[i]);
+            queryBuilder.append(stringContactIds[i]);
             if (contactIds[i] == -1) {
                 return null;
             }
             if (i == contactIds.length -1) {
+                queryBuilder.append(")");
                 break;
             }
-            queryBuilder.append(" OR ");
+            queryBuilder.append(", ");
         }
 
         final Cursor c = resolver.query(RawContacts.CONTENT_URI,
                 JoinContactQuery.PROJECTION,
                 queryBuilder.toString(),
-                stringContactIds, null);
+                null, null);
         if (c == null) {
             Log.e(TAG, "Unable to open Contacts DB cursor");
             showToast(R.string.contactSavedErrorToast);

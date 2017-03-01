@@ -26,6 +26,7 @@ import com.android.contacts.R;
 import com.android.contacts.activities.ContactEditorAccountsChangedActivity;
 import com.android.contacts.activities.ContactEditorBaseActivity;
 import com.android.contacts.activities.ContactEditorBaseActivity.ContactEditor;
+import com.android.contacts.common.SimContactsConstants;
 import com.android.contacts.common.model.AccountTypeManager;
 import com.android.contacts.common.model.Contact;
 import com.android.contacts.common.model.ContactLoader;
@@ -36,6 +37,7 @@ import com.android.contacts.common.model.RawContactModifier;
 import com.android.contacts.common.model.ValuesDelta;
 import com.android.contacts.common.model.account.AccountType;
 import com.android.contacts.common.model.account.AccountWithDataSet;
+import com.android.contacts.common.model.account.SimAccountType;
 import com.android.contacts.common.util.ImplicitIntentsUtil;
 import com.android.contacts.common.util.MaterialColorMapUtils;
 import com.android.contacts.editor.AggregationSuggestionEngine.Suggestion;
@@ -404,6 +406,7 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
     // edit a read-only contact (to which the new raw contact was joined)
     protected StructuredNameEditorView mReadOnlyNameEditorView;
 
+    private boolean isSimAccount = false;
     /**
      * The contact data loader listener.
      */
@@ -770,6 +773,10 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
 
         // Set visibility of menus
 
+        if (mState != null && mState.size() > 0 && mState.get(0).getAccountType() !=null) {
+            isSimAccount = mState.get(0).getAccountType()
+                    .equals(SimAccountType.ACCOUNT_TYPE);
+        }
         // help menu depending on whether this is inserting or editing
         if (isInsert(mAction) || mRawContactIdToDisplayAlone != -1) {
             HelpUtils.prepareHelpMenuItem(mContext, helpMenu, R.string.help_url_people_add);
@@ -778,7 +785,11 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
             deleteMenu.setVisible(false);
         } else if (isEdit(mAction)) {
             HelpUtils.prepareHelpMenuItem(mContext, helpMenu, R.string.help_url_people_edit);
-            splitMenu.setVisible(canUnlinkRawContacts());
+            if (!isSimAccount) {
+                splitMenu.setVisible(canUnlinkRawContacts());
+            } else {
+                joinMenu.setVisible(false);
+            }
             // Cannot join a user profile
             joinMenu.setVisible(!isEditingUserProfile());
             deleteMenu.setVisible(!mDisableDeleteMenuOption && !isEditingUserProfile());
@@ -798,7 +809,7 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
             // if we don't have a telephone or are editing a new contact.
             sendToVoiceMailMenu.setChecked(mSendToVoicemailState);
             sendToVoiceMailMenu.setVisible(mArePhoneOptionsChangable);
-            ringToneMenu.setVisible(mArePhoneOptionsChangable);
+            ringToneMenu.setVisible(mArePhoneOptionsChangable && !isSimAccount);
         }
 
         int size = menu.size();
@@ -962,14 +973,22 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
                 return true;
             }
             onSaveCompleted(/* hadChanges =*/ false, saveMode,
-                    /* saveSucceeded =*/ mLookupUri != null, mLookupUri, /* joinContactId =*/ null);
+                    /* saveSucceeded =*/ mLookupUri != null, mLookupUri, /* joinContactId =*/ null
+                    , getActivity().getIntent().getIntExtra(
+                          ContactSaveService.SAVE_CONTACT_RESULT, 0));
             return true;
         }
 
         setEnabled(false);
 
+        removeSimPhoto();
         return doSaveAction(saveMode, /* joinContactId */ null);
     }
+
+    /**
+     * Remove the Sim photo info.
+     */
+    abstract protected void removeSimPhoto();
 
     /**
      * Persist the accumulated editor deltas.
@@ -1277,7 +1296,9 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
                 // For profile contacts, we need a different query URI
                 rawContactDelta.setProfileQueryUri();
                 // Try to find a local profile contact
-                if (rawContactDelta.getValues().getAsString(RawContacts.ACCOUNT_TYPE) == null) {
+                if (rawContactDelta.getValues().getAsString(RawContacts.ACCOUNT_TYPE) == null
+                        || rawContactDelta.getValues().getAsString(RawContacts.ACCOUNT_TYPE)
+                            .equals(SimContactsConstants.ACCOUNT_TYPE_PHONE)) {
                     localProfileExists = true;
                 }
             }
@@ -1438,12 +1459,16 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
 
     @Override
     public void onJoinCompleted(Uri uri) {
-        onSaveCompleted(false, SaveMode.RELOAD, uri != null, uri, /* joinContactId */ null);
-    }
+        onSaveCompleted(false, SaveMode.RELOAD, uri != null, uri, /* joinContactId */ null,
+                getActivity().getIntent().getIntExtra(
+                        ContactSaveService.SAVE_CONTACT_RESULT, 0));
+        }
 
     @Override
     public void onSaveCompleted(boolean hadChanges, int saveMode, boolean saveSucceeded,
-            Uri contactLookupUri, Long joinContactId) {
+            Uri contactLookupUri, Long joinContactId, int result) {
+        Log.d(TAG, "onSaveCompleted(" + saveMode + ", " + contactLookupUri + ", saveResult:"
+                + result);
         if (hadChanges) {
             if (saveSucceeded) {
                 switch (saveMode) {
@@ -1459,7 +1484,49 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
                 }
 
             } else {
-                Toast.makeText(mContext, R.string.contactSavedErrorToast, Toast.LENGTH_LONG).show();
+                switch (result) {
+                    case ContactSaveService.RESULT_NUMBER_INVALID: {
+                        Toast.makeText(mContext, R.string.invalid_phone_number,
+                            Toast.LENGTH_LONG).show();
+                        break;
+                    }
+                    case ContactSaveService.RESULT_SIM_FAILURE: {
+                        Toast.makeText(mContext,
+                            R.string.contactSavedToSimCardError,
+                            Toast.LENGTH_LONG).show();
+                        break;
+                    }
+                    case ContactSaveService.RESULT_NUMBER_ANR_FAILURE: {
+                        Toast.makeText(mContext, R.string.number_anr_too_long,
+                            Toast.LENGTH_LONG).show();
+                        break;
+                    }
+                    case ContactSaveService.RESULT_EMAIL_FAILURE: {
+                        Toast.makeText(mContext, R.string.email_address_too_long,
+                            Toast.LENGTH_LONG).show();
+                        break;
+                    }
+                    case ContactSaveService.RESULT_SIM_FULL_FAILURE: {
+                        Toast.makeText(mContext, R.string.sim_card_full,
+                            Toast.LENGTH_LONG).show();
+                        break;
+                    }
+                    case ContactSaveService.RESULT_TAG_FAILURE: {
+                        Toast.makeText(mContext, R.string.tag_too_long,
+                            Toast.LENGTH_SHORT).show();
+                        break;
+                    }
+                    case ContactSaveService.RESULT_NO_NUMBER_AND_EMAIL: {
+                        Toast.makeText(mContext, R.string.no_phone_number_or_email,
+                            Toast.LENGTH_SHORT).show();
+                        break;
+                    }
+                    default: {
+                        Toast.makeText(mContext, R.string.contactSavedErrorToast,
+                            Toast.LENGTH_LONG).show();
+                        break;
+                    }
+                }
             }
         }
         switch (saveMode) {
@@ -1703,7 +1770,7 @@ abstract public class ContactEditorBaseFragment extends Fragment implements
             return ContentUris.withAppendedId(legacyContentUri, contactId);
         }
         // Otherwise pass back a lookup-style Uri
-        return contactLookupUri;
+        return contactLookupUri == null? requestLookupUri : contactLookupUri;
     }
 
     /**

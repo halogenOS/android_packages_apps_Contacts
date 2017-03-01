@@ -67,15 +67,26 @@
         android:layout_marginEnd="@dimen/expanding_entry_card_item_sub_header_icon_margin_right"
         android:layout_marginBottom="@dimen/expanding_entry_card_item_sub_header_icon_margin_bottom" />
 
-    <TextView
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:id="@+id/text"
+        android:orientation="horizontal"
         android:layout_below="@+id/sub_header"
         android:layout_toEndOf="@+id/icon_text"
         android:layout_toStartOf="@+id/third_icon"
         android:textAlignment="viewStart"
-        android:textColor="@color/quickcontact_entry_sub_header_text_color" />
+        android:textColor="@color/quickcontact_entry_sub_header_text_color">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:id="@+id/text"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingLeft="16dp"
+            android:id="@+id/home"/>
+    </LinearLayout>
 
     <ImageView
         android:layout_width="wrap_content"
@@ -104,12 +115,26 @@
          android:id="@+id/icon_alternate"
          android:layout_width="wrap_content"
          android:layout_height="wrap_content"
-         android:layout_alignParentEnd="true"
          android:layout_alignParentTop="true"
+         android:layout_alignWithParentIfMissing="true"
+         android:layout_toStartOf="@+id/enrich_icon"
          android:visibility="gone"
          android:background="?android:attr/selectableItemBackgroundBorderless"
          android:paddingTop="@dimen/expanding_entry_card_item_icon_margin_top"
          android:paddingBottom="@dimen/expanding_entry_card_item_icon_margin_bottom"
          android:paddingLeft="@dimen/expanding_entry_card_item_icon_margin_left"
          android:paddingRight="@dimen/expanding_entry_card_item_icon_margin_right"/>
+
+    <ImageView
+        android:id="@+id/enrich_icon"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentEnd="true"
+        android:layout_alignParentTop="true"
+        android:visibility="gone"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:paddingTop="@dimen/expanding_entry_card_item_icon_margin_top"
+        android:paddingBottom="@dimen/expanding_entry_card_item_icon_margin_bottom"
+        android:paddingLeft="@dimen/expanding_entry_card_item_icon_margin_left"
+        android:paddingRight="@dimen/expanding_entry_card_item_icon_margin_right" />
 </view>

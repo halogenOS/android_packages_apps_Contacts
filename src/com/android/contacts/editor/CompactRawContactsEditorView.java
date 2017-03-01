@@ -17,6 +17,7 @@
 package com.android.contacts.editor;
 
 import com.android.contacts.R;
+import com.android.contacts.common.SimContactsConstants;
 import com.android.contacts.common.model.AccountTypeManager;
 import com.android.contacts.common.model.RawContactDelta;
 import com.android.contacts.common.model.RawContactDeltaList;
@@ -65,6 +66,8 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListPopupWindow;
 import android.widget.TextView;
+
+import com.android.contacts.common.MoreContactUtils;
 
 import java.io.FileNotFoundException;
 import java.util.ArrayList;
@@ -851,6 +854,8 @@ public class CompactRawContactsEditorView extends LinearLayout implements View.O
         } else {
             mAccountSelectorName.setVisibility(View.VISIBLE);
             mAccountSelectorName.setText(accountInfo.first);
+            MoreContactUtils.setSimOperatorName(accountInfo.first,
+                    mAccountSelectorName, getContext());
         }
 
         final String selectorTitle = getResources().getString(
@@ -945,8 +950,14 @@ public class CompactRawContactsEditorView extends LinearLayout implements View.O
             return;
         }
 
-        // Set the photo view
-        mPhotoView.setPhoto(photoToDisplay.second, mMaterialPalette);
+        final boolean isSimAccount = SimContactsConstants.ACCOUNT_TYPE_SIM
+                .equals((photoToDisplay.first.getRawContactDelta().getAccountType()));
+        if (isSimAccount) {
+            mPhotoView.setSimPhoto(mMaterialPalette);
+        } else {
+            // Set the photo view
+            mPhotoView.setPhoto(photoToDisplay.second, mMaterialPalette);
+        }
 
         // Find the raw contact ID and values delta that will be written when the photo is edited
         final Pair<KindSectionData, ValuesDelta> photoToWrite = kindSectionDataList.getEntryToWrite(
@@ -955,7 +966,12 @@ public class CompactRawContactsEditorView extends LinearLayout implements View.O
             mPhotoView.setReadOnly(true);
             return;
         }
-        mPhotoView.setReadOnly(false);
+
+        if (isSimAccount) {
+            mPhotoView.setReadOnly(true);
+        } else {
+            mPhotoView.setReadOnly(false);
+        }
         mPhotoRawContactId = photoToWrite.first.getRawContactDelta().getRawContactId();
         mPhotoValuesDelta = photoToWrite.second;
     }
